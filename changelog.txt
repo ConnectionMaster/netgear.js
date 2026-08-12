@@ -1,3 +1,4 @@
+5.0.0 - 12-08-2026 Full code rewrite. Requires Node >=22. Use native fetch. Replaced xml-js with fast-xml-parser. Removed smart-request-balancer dependency. Fixed getWANDNSLookUpStatus, GetConnectionTypeInfoResponse, GetDNSLookUpStatusResponse and getCurrentBandwidthByMAC. Added getAllSatellites, getWPASecurityKeys, get5GWPASecurityKeys, get5G1WPASecurityKeys and getAllMACAddresses. Added automated unit test suite.
 4.4.3 - 21-09-2023 Added SOAP port 5043 detection. Improved autodiscovery.
 4.4.2 - 27-02-2022 Removed orbilogin.com from router discovery. Improved autodiscovery.
 4.4.1 - 12-02-2022 Fixed autodiscovery.

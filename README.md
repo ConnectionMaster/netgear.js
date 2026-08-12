@@ -1,10 +1,10 @@
 ## Nodejs package to communicate with Netgear routers via its SOAP interface.
-Can do more than the Netgear Nighthawk, Orbi or Genie app can do.
+Can do more than the [NETGEAR Nighthawk app](https://www.netgear.com/home/services/nighthawk-app/) or [NETGEAR Orbi app](https://www.netgear.com/home/services/orbi-app/) can do.
 
 ## Supported routers
-In general: If you can use the Nighthawk Orbi or Nighthawk app to manage the router, then this node package will most likely work. Some functionality, like blocking/unblocking an attached device, only work on certain router types. MAKE SURE YOU ARE ON THE LATEST ROUTER FIRMWARE!
+In general: If you can use the NETGEAR Nighthawk app or the NETGEAR Orbi app to manage your router, this node package will most likely work. On older routers that predate those apps, the same is true of the legacy NETGEAR genie app. Some functionality, like blocking/unblocking an attached device, only works on certain router types. MAKE SURE YOU ARE ON THE LATEST ROUTER FIRMWARE!
 
-You can check your router version by browsing to [routerlogin.net](http://routerlogin.net/currentsetting.htm). According to the Genie and NETGEAR Nighthawk app description, at least the following routers or extenders should work:
+You can check your router version by browsing to [routerlogin.net](http://routerlogin.net/currentsetting.htm). According to the genie and NETGEAR Nighthawk app descriptions, at least the following routers or extenders should work:
 
 Nighthawk: AX8 AX12 Tri-Band AX12 XR300 XR450 XR500 XR700 AC2100 AC2400 AC2600 R9000 R8900 R8500 R8300 R8000 R8000P R7900P R7960P R7900 R7800 R7000P R7000 R6900P R6900v2 R6900 R6850 R6800 R7450 R6700v3 R6700v2 R6400v2 R6400 R6350 R6260 R6230 R6220 R6120 R6080 R6020
 
@@ -16,19 +16,37 @@ DSL Modem Gateways: DGN2200B DGND3700B D3600 D6000 D6100 D6200 D6000 D6200B D630
 
 Cable Gateway: C7000 C6300 C6250 C3700 C3000 N450
 
+### Newer / untested routers
+Netgear doesn't publish a list of which models expose this SOAP interface, so the list above is built from years of community reports rather than official documentation - it predates most WiFi 6/6E/7-generation routers. The interface does appear to still exist on at least some current-generation hardware: a [2023 security disclosure](https://therecord.media/netgear-releases-patches-for-two-bugs) documents a SOAP-API authentication flaw specifically in the WiFi 6E **Orbi 760** series, confirming that line still runs a SOAP API. Whether login and the various get/set calls in this package still work unmodified on Orbi 760+/WiFi 7-generation Orbi, or on recent Nighthawk WiFi 6/6E models, has not been verified by this package - if you have one of these and can confirm it works (or doesn't), please [open an issue](https://github.com/gruijter/netgear.js/issues).
+
+## Requirements
+Node.js >= 22.
+
 ## Installation:
 ```
 > npm i netgear
 ```
 
 ## Test:
+`npm test` talks to a real, physical router, same as in previous versions:
 ```
 > npm test password=mySecretPassword
+```
+To instead run the automated unit tests against a mocked router (no hardware needed):
+```
+> npm test -- --unit
 ```
 
 ## Documentation:
 [Detailed documentation](https://gruijter.github.io/netgear.js/ "Netgear.js documentation")
 
+## Migrating from version 4
+Version 5 is methodwise fully compatible with version 4 - no code changes needed beyond bumping your Node.js version to >= 22. The following methods were added:
+- `getWPASecurityKeys()` / `get5GWPASecurityKeys()` / `get5G1WPASecurityKeys()` - the WPA passphrase for the 2.4GHz / 5GHz-2 / 5GHz-1 (tri-band routers) network.
+- `getAllMACAddresses()` - all known parental-control MAC addresses.
+- `getAllSatellites()` - list of Orbi mesh satellites. Still experimental/unverified - the R8000 above isn't an Orbi, so no real capture confirms this one.
+
+The `npm test` CLI is unchanged from version 4 (it still talks to a real router by default). The only addition is the `--unit` switch described above, which runs the new automated unit suite against a mocked router instead.
 
 ## Quickstart:
 ```js
@@ -314,3 +332,5 @@ async function wol(MAC, secureOnPassword) {
 
 wol('AA:BB:CC:DD:EE:FF', '00:00:00:00:00:00');
 ```
+
+
