@@ -46,6 +46,21 @@ Version 5 is methodwise fully compatible with version 4 - no code changes needed
 - `getAllMACAddresses()` - all known parental-control MAC addresses.
 - `getAllSatellites()` - list of Orbi mesh satellites. Still experimental/unverified - the R8000 above isn't an Orbi, so no real capture confirms this one.
 
+NetgearRouter also now extends Node's `EventEmitter` and emits a `'log'` event - see [Logging](#logging) below. This is purely additive; nothing changes if you don't subscribe to it.
+
+## Logging
+Logging is purely additive on top of the existing error handling - every method still rejects/throws exactly as before (see the try/catch examples throughout this README), and you still need to handle those. The `'log'` event is a separate, supplementary diagnostic channel for detail that doesn't fit in a thrown Error's message (e.g. full request/response tracing) - it never replaces or changes what gets thrown.
+
+`NetgearRouter` never writes to the console directly. Instead it emits a `'log'` event so you can route output into whatever logger your app already uses:
+```js
+const router = new Netgear({ password: 'mySecretPassword', logLevel: 'warn' });
+
+router.on('log', ({ level, message, ...context }) => {
+	console.log(`[${level}] ${message}`, context);
+});
+```
+`logLevel` (default `'warn'`) controls verbosity: `'silent' < 'error' < 'warn' < 'info' < 'debug'`. At the default `'warn'` level you only see genuine problems (a failed login, a failed router discovery) - fallback ladders (e.g. trying login method 2 before falling back to method 1) don't spam a warning for the expected first failure. Set `logLevel: 'debug'` (or `router.logLevel = 'debug'` at any time) to get full SOAP request/response tracing, including timing and a truncated response body. Session cookies and the login password are always redacted before anything is logged, even at `'debug'`.
+
 The `npm test` CLI is unchanged from version 4 (it still talks to a real router by default). The only addition is the `--unit` switch described above, which runs the new automated unit suite against a mocked router instead.
 
 ## Quickstart:

@@ -14,6 +14,7 @@ const dns = require('node:dns/promises');
 const dgram = require('node:dgram');
 const os = require('node:os');
 const timersPromises = require('node:timers/promises');
+const { EventEmitter } = require('node:events');
 
 const soap = require('./lib/soapcalls');
 const xml = require('./lib/xml');
@@ -27,6 +28,26 @@ const defaultHost = 'routerlogin.net';
 const defaultUser = 'admin';
 const defaultPassword = 'password';
 const defaultSessionId = 'A7D88AE69687E58D9A00';	// '10588AE69687E58D9A00'
+
+// Increasing verbosity; a message is only emitted when its rank is <= the configured
+// logLevel's rank. 'silent' (-1) emits nothing at all.
+const logLevelRanks = {
+	silent: -1, error: 0, warn: 1, info: 2, debug: 3,
+};
+
+const maxLoggedBodyLength = 500;
+
+// Strips the login password before a raw SOAP request body is ever logged - even at the
+// most verbose 'debug' level, credentials must never leak into whatever log sink a
+// consumer wires up (e.g. a Homey diagnostics report). Also truncates long bodies so a
+// single verbose call can't flood a size-limited log buffer.
+const redactBody = (body) => {
+	if (typeof body !== 'string') return body;
+	const redacted = body.replace(/<Password>.*?<\/Password>/gi, '<Password>[redacted]</Password>');
+	return redacted.length > maxLoggedBodyLength
+		? `${redacted.slice(0, maxLoggedBodyLength)}...[truncated]`
+		: redacted;
+};
 
 class AttachedDevice {
 	constructor() {
@@ -56,9 +77,10 @@ class AttachedDevice {
 	}
 }
 
-class NetgearRouter {
+class NetgearRouter extends EventEmitter {
 	// password, username, host and port are deprecated. Now use { password: '', username: '', host:'routerlogin.net', port: 80, timeout: 19000, tls: false}
 	constructor(opts, username, host, port) {
+		super();
 		const options = opts || {};
 		this.host = options.host || host || defaultHost;
 		this.port = options.port || port;	// defaults with tls: 443, 5555. no tls: 5000, 80
@@ -81,6 +103,23 @@ class NetgearRouter {
 		};
 		this.lastResponse = undefined;
 		this.queue = new RequestQueue({ ratePerSecond: 3 });
+		// controls which _log() calls actually emit a 'log' event - see _log() below.
+		// Mutable at any time (e.g. `router.logLevel = 'debug'` while troubleshooting).
+		this.logLevel = options.logLevel || 'warn';
+	}
+
+	// Emits a 'log' event ({ level, message, timestamp, ...context }) when `level` is at or
+	// below the current this.logLevel verbosity. Deliberately not named 'error' - EventEmitter
+	// throws if an 'error' event has no listener, which would crash a consumer that never
+	// subscribed. Consumers (e.g. the Homey app) wire this into their own logger:
+	// `router.on('log', ({ level, message, ...context }) => this.log(level, message, context))`.
+	_log(level, message, context = {}) {
+		const rank = logLevelRanks[level];
+		const threshold = logLevelRanks[this.logLevel] ?? logLevelRanks.warn;
+		if (rank === undefined || rank > threshold) return;
+		this.emit('log', {
+			level, message, timestamp: new Date().toISOString(), ...context,
+		});
 	}
 
 	/**
@@ -169,8 +208,14 @@ class NetgearRouter {
 					return false;
 				});
 		}
-		if (!loggedIn) throw new Error('Failed to login');
+		if (!loggedIn) {
+			this._log('warn', 'Login failed', { host: this.host, port: this.port });
+			throw new Error('Failed to login');
+		}
 		this.loggedIn = true;
+		this._log('info', 'Login succeeded', {
+			host: this.host, port: this.port, loginMethod: this.loginMethod,
+		});
 		return this.loggedIn;
 	}
 
@@ -195,9 +240,16 @@ class NetgearRouter {
 		const url = `http://${host1}:80/currentsetting.htm`;
 		const result = await http.request(url, { method: 'GET', timeout: timeout || this.timeout });
 		this.lastResponse = result.body;
-		// request failed
-		if (result.statusCode !== 200) throw errors.httpRequestFailed(result.statusCode);
-		if (!result.body.includes('Model=')) throw errors.notNetgearRouter();
+		// request failed. Logged at 'debug', not 'warn': this method is also used to probe up
+		// to 254 hosts during network-scan discovery, where most hosts are expected to fail.
+		if (result.statusCode !== 200) {
+			this._log('debug', 'getCurrentSetting: non-200 response', { host: host1, statusCode: result.statusCode });
+			throw errors.httpRequestFailed(result.statusCode);
+		}
+		if (!result.body.includes('Model=')) {
+			this._log('debug', 'getCurrentSetting: not a Netgear router', { host: host1 });
+			throw errors.notNetgearRouter();
+		}
 		// request successfull
 		const currentSetting = {};
 		result.body.split(/[\r\n\t\s]+/gm).forEach((entry) => {
@@ -211,6 +263,9 @@ class NetgearRouter {
 			|| currentSetting.port === 5043) currentSetting.tls = true; // add tls to the information
 		this.loginMethod = Number(currentSetting.LoginMethod) || 1;
 		this.soapVersion = parseInt(currentSetting.SOAPVersion, 10) || 2;
+		this._log('debug', 'getCurrentSetting discovered', {
+			host: host1, port: currentSetting.port, tls: currentSetting.tls,
+		});
 		return currentSetting;
 	}
 
@@ -1127,7 +1182,10 @@ class NetgearRouter {
 		try {
 			return await fn();
 		} finally {
-			await this._configurationFinished().catch((error) => { this.lastResponse = error; });
+			await this._configurationFinished().catch((error) => {
+				this.lastResponse = error;
+				this._log('warn', 'ConfigurationFinished failed', { error: error.message });
+			});
 		}
 	}
 
@@ -1181,9 +1239,11 @@ class NetgearRouter {
 			if (host) info = await this.getCurrentSetting(host.address || host).catch(() => undefined); // weird, sometimes it doesn't have .address
 			// else try ip scanning
 			if (!info) [info] = await this._discoverAllHostsInfo();
+			this._log('info', 'Router discovered', { host: info && info.host });
 			return info; // info.host has the ipAddress
 		} catch (error) {
 			this.lastResponse = error;
+			this._log('warn', 'Router discovery failed', { error: error.message });
 			throw error;
 		}
 	}
@@ -1219,6 +1279,7 @@ class NetgearRouter {
 			return discoveredHosts;
 		} catch (error) {
 			this.lastResponse = error;
+			this._log('warn', 'Network scan discovery failed', { error: error.message });
 			throw error;
 		}
 	}
@@ -1238,9 +1299,17 @@ class NetgearRouter {
 		};
 		if (this.cookie) headers.cookie = Array.isArray(this.cookie) ? this.cookie.join('; ') : this.cookie;
 		const url = `${tls ? 'https' : 'http'}://${host}:${port}/soap/server_sa/`;
-		return http.request(url, {
+		this._log('debug', 'SOAP request', {
+			action, host, port, tls, body: redactBody(message),
+		});
+		const startedAt = Date.now();
+		const result = await http.request(url, {
 			method: 'POST', headers, body: message, timeout, insecure: tls,
 		});
+		this._log('debug', 'SOAP response', {
+			action, host, port, statusCode: result.statusCode, durationMs: Date.now() - startedAt, body: redactBody(result.body),
+		});
+		return result;
 	}
 
 	async _probeSoapEndpoint(host, port, tls) {
@@ -1291,30 +1360,39 @@ class NetgearRouter {
 	}
 
 	async _makeRequest(action, message) {
-		if (!this.loggedIn && action !== soap.action.login && action !== soap.action.loginOld) {
-			throw new Error('Not logged in');
+		try {
+			if (!this.loggedIn && action !== soap.action.login && action !== soap.action.loginOld) {
+				throw new Error('Not logged in');
+			}
+			const result = await this._soapRequest(action, message);
+			this.lastResponse = result.body;
+			if (result.headers['set-cookie']) this.cookie = result.headers['set-cookie'];
+			if (result.statusCode !== 200) {
+				this.lastResponse = result.statusCode;
+				throw errors.httpRequestFailed(result.statusCode);
+			}
+			// extractXmlTag deliberately: <ResponseCode> is a sibling of the action's own response
+			// element, not nested inside it, and this runs before any action-specific parsing knows
+			// (or cares) what that element is named - parseSoapObject has nothing to descend into here.
+			const responseCode = xml.extractXmlTag(result.body, 'ResponseCode', { optional: true });
+			if (responseCode === undefined) throw errors.noResponseCode();
+			const code = Number(responseCode);
+			if (code === 0) {
+				const patchedBody = xml.patchBody(result.body);
+				if (!patchedBody.includes('</v:Envelope>')) throw errors.incompleteSoapEnvelope();
+				return { ...result, body: patchedBody };
+			}
+			// request failed
+			if (code === 401) this.loggedIn = false;
+			throw errors.soapResponseCode(code);
+		} catch (error) {
+			// logged at 'debug', not 'warn': many call sites (login()'s fallback ladder,
+			// checkNewFirmware, guest-wifi tryInOrder, getAttachedDevices auto mode) intentionally
+			// try a method that's expected to sometimes fail before falling back to another one -
+			// those top-level methods log their own 'warn'/'info' once the overall outcome is known.
+			this._log('debug', 'SOAP request failed', { action, error: error.message });
+			throw error;
 		}
-		const result = await this._soapRequest(action, message);
-		this.lastResponse = result.body;
-		if (result.headers['set-cookie']) this.cookie = result.headers['set-cookie'];
-		if (result.statusCode !== 200) {
-			this.lastResponse = result.statusCode;
-			throw errors.httpRequestFailed(result.statusCode);
-		}
-		// extractXmlTag deliberately: <ResponseCode> is a sibling of the action's own response
-		// element, not nested inside it, and this runs before any action-specific parsing knows
-		// (or cares) what that element is named - parseSoapObject has nothing to descend into here.
-		const responseCode = xml.extractXmlTag(result.body, 'ResponseCode', { optional: true });
-		if (responseCode === undefined) throw errors.noResponseCode();
-		const code = Number(responseCode);
-		if (code === 0) {
-			const patchedBody = xml.patchBody(result.body);
-			if (!patchedBody.includes('</v:Envelope>')) throw errors.incompleteSoapEnvelope();
-			return { ...result, body: patchedBody };
-		}
-		// request failed
-		if (code === 401) this.loggedIn = false;
-		throw errors.soapResponseCode(code);
 	}
 
 	// queue stuff
@@ -1353,13 +1431,26 @@ module.exports = NetgearRouter;
 
 /**
 * @class NetgearRouter
-* @classdesc Class representing a session with a Netgear router.
+* @classdesc Class representing a session with a Netgear router. Every method still
+	rejects/throws exactly as documented below on failure - that error handling is
+	unchanged. On top of that, this class extends Node's EventEmitter and emits a 'log'
+	event ({@link logEvent}) as a separate, supplementary diagnostic channel for detail
+	that doesn't fit in a thrown Error's message (request/response tracing, notable
+	outcomes like login success/failure, discovery, etc) - it never replaces or changes
+	what gets thrown. Nothing is written to the console directly - subscribe to 'log' to
+	route it into your own logger (e.g. a Homey app's `this.log()`/`this.error()`, so the
+	detail ends up in a diagnostics report). The `logLevel` session option (default 'warn')
+	controls verbosity; set it to 'debug' for full SOAP request/response tracing
+	(credentials are always redacted before logging).
 * @param {sessionOptions} [options] - configurable session options
 * @property {boolean} loggedIn - login state.
+* @property {string} logLevel - current log verbosity ('silent'|'error'|'warn'|'info'|'debug'),
+	mutable at any time.
 * @example // create a router session, login to router, fetch attached devices
 	const Netgear = require('netgear');
 
 	const router = new Netgear();
+	router.on('log', ({ level, message, ...context }) => console.log(level, message, context));
 
 	async function getDevices() {
 		try {
@@ -1385,12 +1476,30 @@ module.exports = NetgearRouter;
 * @property {number} [method = 0] - 0: auto, 1: v1 (old), 2: v2 (new)
 * @property {number} [timeout = 18000] - http(s) timeout in milliseconds. Defaults to 18000ms.
 * @property {boolean} [tls = false] - Use TLS/SSL (HTTPS) for SOAP calls. Defaults to false.
+* @property {string} [logLevel = 'warn'] - One of 'silent', 'error', 'warn', 'info', 'debug'.
+	Controls which 'log' events (see NetgearRouter's class description) get emitted. Also settable
+	at any time via `router.logLevel = 'debug'`.
 * @example // router options
 { password: 'mySecretPassword',
   host:'routerlogin.net',
   port: 5000,
   timeout: 19000,
-  tls: false }
+  tls: false,
+  logLevel: 'warn' }
+*/
+
+/**
+* @typedef logEvent
+* @description Payload of the 'log' event emitted by a NetgearRouter instance. This is a
+	supplementary diagnostic channel only - it runs alongside, not instead of, each method's
+	normal rejected/thrown Error, which is unaffected by whether anything subscribes to 'log'.
+	Extra context fields vary by call site - common ones include `action` (the SOAP action
+	name), `host`/`port`/`tls`, `statusCode`, `durationMs`, and `error` (a message string,
+	not an Error instance). At logLevel 'debug', SOAP request/response events also include a
+	`body` field (truncated, with `<Password>` redacted).
+* @property {string} level - 'error', 'warn', 'info' or 'debug'.
+* @property {string} message - short human-readable summary, e.g. 'SOAP request failed'.
+* @property {string} timestamp - ISO 8601 timestamp of when the event was emitted.
 */
 
 /**
