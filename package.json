@@ -6,6 +6,19 @@
   "engines": {
     "node": ">=22.0.0"
   },
+  "files": [
+    "netgear.js",
+    "lib",
+    "test/test.js",
+    "test/_test.js",
+    "test/runkitTest.js",
+    ".eslintrc",
+    ".jsdoc.json",
+    "changelog.txt",
+    "CODE_OF_CONDUCT.md",
+    "CONTRIBUTING.md",
+    "FUNDING.yml"
+  ],
   "scripts": {
     "test": "node test/test.js",
     "test:unit": "node --test test/unit/*.test.js",

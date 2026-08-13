@@ -35,6 +35,14 @@ test('parseSoapObject maps empty/self-closing tags to undefined, matching the xm
 	assert.equal(result.OthersoftwareVersion, 'N/A');
 });
 
+test('parseSoapObject maps a whitespace-only tag to undefined too, matching the xml-js behavior it replaces', () => {
+	const body = envelope('<m:GetInfoResponse><VPNVersion>   </VPNVersion><FirmwareDLmethod>\n</FirmwareDLmethod><OthersoftwareVersion>N/A</OthersoftwareVersion></m:GetInfoResponse>');
+	const result = xml.parseSoapObject(body, 'GetInfoResponse');
+	assert.equal(result.VPNVersion, undefined);
+	assert.equal(result.FirmwareDLmethod, undefined);
+	assert.equal(result.OthersoftwareVersion, 'N/A');
+});
+
 test('parseSoapObject keeps values as strings by default (nativeType off)', () => {
 	const body = envelope('<m:GetSystemInfoResponse><NewCPUUtilization>21</NewCPUUtilization></m:GetSystemInfoResponse>');
 	const result = xml.parseSoapObject(body, 'GetSystemInfoResponse');

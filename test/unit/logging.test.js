@@ -133,6 +133,30 @@ test('the login password is never present in an emitted log payload, even at log
 	assert.match(serialized, /\[redacted]/);
 });
 
+test('the login password is never present in an emitted log payload for the legacy loginOld method either (uses a differently-named <NewPassword> tag)', async () => {
+	const router = makeRouter({
+		logLevel: 'debug', loggedIn: false, loginMethod: 1, password: 'super-secret-password',
+	});
+	const events = collectLogs(router);
+	reply(soap.action.loginOld, soapOk());
+
+	await router.login({ method: 1 });
+	const serialized = JSON.stringify(events);
+	assert.doesNotMatch(serialized, /super-secret-password/);
+	assert.match(serialized, /\[redacted]/);
+});
+
+test('a WPA passphrase returned by getWPASecurityKeys is never present in an emitted log payload, even at logLevel:"debug"', async () => {
+	const router = makeRouter({ logLevel: 'debug' });
+	const events = collectLogs(router);
+	reply(soap.action.getWPASecurityKeys, soapOk('<m:GetWPASecurityKeysResponse><NewWPAPassphrase>mySecretWifiPassword</NewWPAPassphrase></m:GetWPASecurityKeysResponse>'));
+
+	await router.getWPASecurityKeys();
+	const serialized = JSON.stringify(events);
+	assert.doesNotMatch(serialized, /mySecretWifiPassword/);
+	assert.match(serialized, /\[redacted]/);
+});
+
 test('logLevel is mutable at runtime - bumping it takes effect on the next call', async () => {
 	const router = makeRouter();
 	const events = collectLogs(router);

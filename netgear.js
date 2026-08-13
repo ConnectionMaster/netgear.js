@@ -37,13 +37,19 @@ const logLevelRanks = {
 
 const maxLoggedBodyLength = 500;
 
-// Strips the login password before a raw SOAP request body is ever logged - even at the
-// most verbose 'debug' level, credentials must never leak into whatever log sink a
-// consumer wires up (e.g. a Homey diagnostics report). Also truncates long bodies so a
-// single verbose call can't flood a size-limited log buffer.
+// Strips any secret-bearing tag before a raw SOAP body is ever logged - even at the most
+// verbose 'debug' level, credentials must never leak into whatever log sink a consumer wires
+// up (e.g. a Homey diagnostics report). Covers both request-side password tags - <Password>
+// (soap.login) and <NewPassword ...> (soap.loginOld, which uses a differently-named tag with
+// attributes on its opening tag - see lib/soapcalls.js) - and the response-side WPA passphrase
+// (<NewWPAPassphrase>, returned by getWPASecurityKeys()/get5GWPASecurityKeys()/
+// get5G1WPASecurityKeys()). Also truncates long bodies so a single verbose call can't flood a
+// size-limited log buffer.
+const secretTagPattern = /<(Password|NewPassword|NewWPAPassphrase)\b[^>]*>.*?<\/\1>/gis;
+
 const redactBody = (body) => {
 	if (typeof body !== 'string') return body;
-	const redacted = body.replace(/<Password>.*?<\/Password>/gi, '<Password>[redacted]</Password>');
+	const redacted = body.replace(secretTagPattern, (match, tagName) => `<${tagName}>[redacted]</${tagName}>`);
 	return redacted.length > maxLoggedBodyLength
 		? `${redacted.slice(0, maxLoggedBodyLength)}...[truncated]`
 		: redacted;
@@ -1331,10 +1337,12 @@ class NetgearRouter extends EventEmitter {
 			{ port: 5000, tls: false },
 			{ port: 80, tls: false },
 		];
-		// probe all candidates concurrently (rather than one at a time) and pick the
-		// earliest-listed responder, preserving the original priority order
+		// probe all candidates concurrently (rather than one at a time), through the same
+		// rate-limited queue every other SOAP call goes through - so a port scan can't burst the
+		// router with 5 simultaneous unthrottled requests - and pick the earliest-listed responder,
+		// preserving the original priority order
 		const results = await Promise.all(
-			candidates.map(({ port, tls }) => this._probeSoapEndpoint(host1, port, tls)),
+			candidates.map(({ port, tls }) => this.queue.enqueue(() => this._probeSoapEndpoint(host1, port, tls))),
 		);
 		const index = results.findIndex(Boolean);
 		return index === -1 ? undefined : candidates[index].port;

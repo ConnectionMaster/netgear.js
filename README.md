@@ -27,14 +27,38 @@ Node.js >= 22.
 > npm i netgear
 ```
 
-## Test:
-`npm test` talks to a real, physical router, same as in previous versions:
+## Test from CLI after installation:
 ```
+> cd node_modules/netgear
 > npm test password=mySecretPassword
 ```
-To instead run the automated unit tests against a mocked router (no hardware needed):
+Note: The automated unit test suite (mocked router, no hardware needed) is a repo-only dev tool, not part of the published package - `npm test -- --unit` only works from a git clone of this repo, not from an installed copy:
 ```
+> git clone https://github.com/gruijter/netgear.js.git
+> cd netgear.js
+> npm i
 > npm test -- --unit
+```
+
+## Quickstart:
+```js
+// create a router session, login to router, fetch attached devices
+const Netgear = require('netgear');
+
+const router = new Netgear();
+
+async function getDevices() {
+	try {
+		const options = { password: 'mySecretPassword' };
+		await router.login(options);
+		const deviceArray = await router.getAttachedDevices();
+		console.log(deviceArray);
+	} catch (error) {
+		console.log(error);
+	}
+}
+
+getDevices();
 ```
 
 ## Documentation:
@@ -60,29 +84,6 @@ router.on('log', ({ level, message, ...context }) => {
 });
 ```
 `logLevel` (default `'warn'`) controls verbosity: `'silent' < 'error' < 'warn' < 'info' < 'debug'`. At the default `'warn'` level you only see genuine problems (a failed login, a failed router discovery) - fallback ladders (e.g. trying login method 2 before falling back to method 1) don't spam a warning for the expected first failure. Set `logLevel: 'debug'` (or `router.logLevel = 'debug'` at any time) to get full SOAP request/response tracing, including timing and a truncated response body. Session cookies and the login password are always redacted before anything is logged, even at `'debug'`.
-
-The `npm test` CLI is unchanged from version 4 (it still talks to a real router by default). The only addition is the `--unit` switch described above, which runs the new automated unit suite against a mocked router instead.
-
-## Quickstart:
-```js
-// create a router session, login to router, fetch attached devices
-const Netgear = require('netgear');
-
-const router = new Netgear();
-
-async function getDevices() {
-	try {
-		const options = { password: 'mySecretPassword' };
-		await router.login(options);
-		const deviceArray = await router.getAttachedDevices();
-		console.log(deviceArray);
-	} catch (error) {
-		console.log(error);
-	}
-}
-
-getDevices();
-```
 
 ## Example code:
 ```js
