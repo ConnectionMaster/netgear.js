@@ -72,17 +72,40 @@
 <p>Cable Gateway: C7000 C6300 C6250 C3700 C3000 N450</p>
 <h3>Newer / untested routers</h3>
 <p>Netgear doesn't publish a list of which models expose this SOAP interface, so the list above is built from years of community reports rather than official documentation - it predates most WiFi 6/6E/7-generation routers. The interface does appear to still exist on at least some current-generation hardware: a <a href="https://therecord.media/netgear-releases-patches-for-two-bugs">2023 security disclosure</a> documents a SOAP-API authentication flaw specifically in the WiFi 6E <strong>Orbi 760</strong> series, confirming that line still runs a SOAP API. Whether login and the various get/set calls in this package still work unmodified on Orbi 760+/WiFi 7-generation Orbi, or on recent Nighthawk WiFi 6/6E models, has not been verified by this package - if you have one of these and can confirm it works (or doesn't), please <a href="https://github.com/gruijter/netgear.js/issues">open an issue</a>.</p>
+<p>Recent firmware on some of these models is HTTPS-only: it refuses plain <code>http</code> on port 80 outright, and serves both <code>currentsetting.htm</code> and the SOAP endpoint over TLS on port 443, 5043 or 5555. Since v5.0.1 autodiscovery handles this - <code>getCurrentSetting()</code> falls back to those TLS ports when :80 cannot be reached, and <code>login()</code> adopts the discovered port and scheme - so you should not need to set <code>port</code> or <code>tls</code> by hand. If discovery still fails on such a router, run the compatibility test (<code>npm test password=mySecretPassword</code>) and include its output in an issue: the <code>effective transport:</code> line reports which port and scheme were actually used.</p>
 <h2>Requirements</h2>
 <p>Node.js &gt;= 22.</p>
 <h2>Installation:</h2>
 <pre class="prettyprint source"><code>> npm i netgear
 </code></pre>
-<h2>Test:</h2>
-<p><code>npm test</code> talks to a real, physical router, same as in previous versions:</p>
-<pre class="prettyprint source"><code>> npm test password=mySecretPassword
+<h2>Test from CLI after installation:</h2>
+<pre class="prettyprint source"><code>> cd node_modules/netgear
+> npm test password=mySecretPassword
 </code></pre>
-<p>To instead run the automated unit tests against a mocked router (no hardware needed):</p>
-<pre class="prettyprint source"><code>> npm test -- --unit
+<p>Note: The automated unit test suite (mocked router, no hardware needed) is a repo-only dev tool, not part of the published package - <code>npm test -- --unit</code> only works from a git clone of this repo, not from an installed copy:</p>
+<pre class="prettyprint source"><code>> git clone https://github.com/gruijter/netgear.js.git
+> cd netgear.js
+> npm i
+> npm test -- --unit
+</code></pre>
+<h2>Quickstart:</h2>
+<pre class="prettyprint source lang-js"><code>// create a router session, login to router, fetch attached devices
+const Netgear = require('netgear');
+
+const router = new Netgear();
+
+async function getDevices() {
+	try {
+		const options = { password: 'mySecretPassword' };
+		await router.login(options);
+		const deviceArray = await router.getAttachedDevices();
+		console.log(deviceArray);
+	} catch (error) {
+		console.log(error);
+	}
+}
+
+getDevices();
 </code></pre>
 <h2>Documentation:</h2>
 <p><a href="https://gruijter.github.io/netgear.js/" title="Netgear.js documentation">Detailed documentation</a></p>
@@ -104,26 +127,6 @@ router.on('log', ({ level, message, ...context }) => {
 });
 </code></pre>
 <p><code>logLevel</code> (default <code>'warn'</code>) controls verbosity: <code>'silent' &lt; 'error' &lt; 'warn' &lt; 'info' &lt; 'debug'</code>. At the default <code>'warn'</code> level you only see genuine problems (a failed login, a failed router discovery) - fallback ladders (e.g. trying login method 2 before falling back to method 1) don't spam a warning for the expected first failure. Set <code>logLevel: 'debug'</code> (or <code>router.logLevel = 'debug'</code> at any time) to get full SOAP request/response tracing, including timing and a truncated response body. Session cookies and the login password are always redacted before anything is logged, even at <code>'debug'</code>.</p>
-<p>The <code>npm test</code> CLI is unchanged from version 4 (it still talks to a real router by default). The only addition is the <code>--unit</code> switch described above, which runs the new automated unit suite against a mocked router instead.</p>
-<h2>Quickstart:</h2>
-<pre class="prettyprint source lang-js"><code>// create a router session, login to router, fetch attached devices
-const Netgear = require('netgear');
-
-const router = new Netgear();
-
-async function getDevices() {
-	try {
-		const options = { password: 'mySecretPassword' };
-		await router.login(options);
-		const deviceArray = await router.getAttachedDevices();
-		console.log(deviceArray);
-	} catch (error) {
-		console.log(error);
-	}
-}
-
-getDevices();
-</code></pre>
 <h2>Example code:</h2>
 <pre class="prettyprint source lang-js"><code>const NetgearRouter = require('netgear');
 
@@ -138,7 +141,11 @@ router.discover()
 // function to get various information
 async function getRouterInfo() {
 	try {
-		// Get router type, soap version, firmware version and internet connection status without login
+		// Get router type, soap version, firmware version and internet connection status without login.
+		// Autodiscovers the SOAP port and whether TLS is needed. Optional extra arguments:
+		// getCurrentSetting(host, timeout, { httpsFallback: true }) - httpsFallback (default
+		// true) also probes currentsetting.htm over TLS on ports 443, 5043 and 5555 when plain
+		// http:80 cannot be reached, which is what HTTPS-only firmware needs.
 		const currentSetting = await router.getCurrentSetting();
 		console.log(currentSetting);
 
@@ -147,7 +154,7 @@ async function getRouterInfo() {
 			password: 'mySecretPassword',	// Password can also be passed during login
 			host: '192.168.1.1',	// Autodiscovery will be performed when left out
 			port: 80,	// SOAP port. Autodiscovery will be performed when left out
-			tls: false,	// TLS/SSL (HTTPS) is only supported on certain router types
+			tls: false,	// Use HTTPS for the SOAP calls. Autodiscovery will be performed when left out
 		}
 		await router.login(options);
 
@@ -400,7 +407,7 @@ wol('AA:BB:CC:DD:EE:FF', '00:00:00:00:00:00');
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc3/jsdoc">JSDoc 4.0.5</a> on Wed Aug 12 2026 21:52:48 GMT+0200 (Midden-Europese zomertijd) using the <a href="https://github.com/clenemt/docdash">docdash</a> theme.
+    Documentation generated by <a href="https://github.com/jsdoc3/jsdoc">JSDoc 4.0.5</a> on Mon Aug 31 2026 13:00:02 GMT+0200 (Midden-Europese zomertijd) using the <a href="https://github.com/clenemt/docdash">docdash</a> theme.
 </footer>
 
 <script>prettyPrint();</script>
