@@ -98,9 +98,117 @@ test('getCurrentSetting rejects on a non-200 HTTP status', async () => {
 	await assert.rejects(router.getCurrentSetting('192.168.1.1'), /HTTP request Failed. Status Code: 500/);
 });
 
+test('getCurrentSetting falls back to an https port when http:80 cannot connect', async () => {
+	// http://192.168.1.1:80 left unmocked -> disableNetConnect() makes it a connection error
+	mockAgent.get('https://192.168.1.1').intercept({ path: '/currentsetting.htm', method: 'GET' })
+		.reply(200, currentSettingBody('SOAP_HTTPs_Port=443\n'));
+
+	const router = makeRouter({ host: undefined, port: undefined, tls: undefined });
+	const currentSetting = await router.getCurrentSetting('192.168.1.1');
+	assert.equal(currentSetting.port, '443');
+	assert.equal(currentSetting.tls, true);
+	assert.equal(router.loginMethod, 2);
+});
+
+test('getCurrentSetting does NOT fall back to https when http:80 gives a definitive response', async () => {
+	// :80 answers with a non-router body; the https ports would 200 but must never be tried
+	mockAgent.get('http://192.168.1.1').intercept({ path: '/currentsetting.htm', method: 'GET' })
+		.reply(200, 'not a router response');
+	mockAgent.get('https://192.168.1.1').intercept({ path: '/currentsetting.htm', method: 'GET' })
+		.reply(200, currentSettingBody('SOAP_HTTPs_Port=443\n'));
+
+	const router = makeRouter({ host: undefined, port: undefined, tls: undefined });
+	await assert.rejects(router.getCurrentSetting('192.168.1.1'), /not a valid Netgear router/);
+});
+
+test('getCurrentSetting honours httpsFallback:false (the network-scan path)', async () => {
+	// :80 unreachable; even though an https port would answer, fallback is disabled -> reject
+	mockAgent.get('https://192.168.1.1').intercept({ path: '/currentsetting.htm', method: 'GET' })
+		.reply(200, currentSettingBody('SOAP_HTTPs_Port=443\n'));
+
+	const router = makeRouter({ host: undefined, port: undefined, tls: undefined });
+	// the :80 connection failure is what must surface - not a later probe's error, and not
+	// some unrelated throw, which an unmatched assert.rejects() would happily accept
+	await assert.rejects(
+		router.getCurrentSetting('192.168.1.1', undefined, { httpsFallback: false }),
+		(error) => /fetch failed/.test(error.message) && /http:\/\/192\.168\.1\.1/.test(String(error.cause)),
+	);
+});
+
+test('getCurrentSetting keeps probing past an https port that answers with a non-router page', async () => {
+	// the HTTPS-only Orbi case: :80 refused, :443 serves the web-UI login page, and the real
+	// currentsetting.htm lives on :5555. A response on a fallback port is not authoritative.
+	mockAgent.get('https://192.168.1.1').intercept({ path: '/currentsetting.htm', method: 'GET' })
+		.reply(200, '<html>Orbi login</html>');
+	mockAgent.get('https://192.168.1.1:5555').intercept({ path: '/currentsetting.htm', method: 'GET' })
+		.reply(200, currentSettingBody());
+
+	const router = makeRouter({ host: undefined, port: undefined, tls: undefined });
+	const currentSetting = await router.getCurrentSetting('192.168.1.1');
+	assert.equal(currentSetting.Model, 'R7800');
+	// no SOAP_HTTPs_Port in the body: the port that actually answered seeds the result,
+	// instead of falling through to an independent (and unmocked) SOAP port scan
+	assert.equal(currentSetting.port, 5555);
+	assert.equal(currentSetting.tls, true);
+});
+
+test('getCurrentSetting keeps probing past an https port that 404s', async () => {
+	mockAgent.get('https://192.168.1.1').intercept({ path: '/currentsetting.htm', method: 'GET' }).reply(404, 'nope');
+	mockAgent.get('https://192.168.1.1:5043').intercept({ path: '/currentsetting.htm', method: 'GET' })
+		.reply(200, currentSettingBody());
+
+	const router = makeRouter({ host: undefined, port: undefined, tls: undefined });
+	const currentSetting = await router.getCurrentSetting('192.168.1.1');
+	assert.equal(currentSetting.port, 5043); // 5043 is a TLS SOAP port and must be probed too
+	assert.equal(currentSetting.tls, true);
+});
+
+test('getCurrentSetting picks the earliest-priority https port when several answer', async () => {
+	mockAgent.get('https://192.168.1.1').intercept({ path: '/currentsetting.htm', method: 'GET' })
+		.reply(200, currentSettingBody());
+	mockAgent.get('https://192.168.1.1:5555').intercept({ path: '/currentsetting.htm', method: 'GET' })
+		.reply(200, currentSettingBody());
+
+	const router = makeRouter({ host: undefined, port: undefined, tls: undefined });
+	const currentSetting = await router.getCurrentSetting('192.168.1.1');
+	assert.equal(currentSetting.port, 443);
+	assert.equal(currentSetting.tls, true);
+});
+
 test('_getSoapPort returns undefined when no candidate port responds', async () => {
 	// no probe interceptors registered at all -> every candidate is rejected by disableNetConnect
 	const router = makeRouter();
 	const port = await router._getSoapPort('192.168.1.1');
 	assert.equal(port, undefined);
+});
+
+test('login adopts the tls discovered by the https fallback, not the constructor default', async () => {
+	// end-to-end HTTPS-only case: http:80 refused, currentsetting.htm only on TLS :5555.
+	// login() must then send its SOAP call over https:5555 - keeping the port-derived
+	// tls default here would aim every authenticated call at a port the router refuses.
+	mockAgent.get('https://192.168.1.1:5555').intercept({ path: '/currentsetting.htm', method: 'GET' })
+		.reply(200, currentSettingBody());
+	mockAgent.get('https://192.168.1.1:5555').intercept({ path: '/soap/server_sa/', method: 'POST' })
+		.reply(200, soapPortOkResponse());
+
+	const router = makeRouter({
+		port: undefined, tls: false, loginMethod: undefined, loggedIn: false,
+	});
+	assert.equal(await router.login(), true);
+	assert.equal(router.port, 5555);
+	assert.equal(router.tls, true);
+});
+
+test('login keeps an explicitly configured tls over the discovered one', async () => {
+	const router = makeRouter({ port: undefined, loginMethod: undefined, loggedIn: false });
+	router.tlsWasSet = true; // as set by the constructor for `new NetgearRouter({ tls: false })`
+	router.tls = false;
+	mockAgent.get('https://192.168.1.1:5555').intercept({ path: '/currentsetting.htm', method: 'GET' })
+		.reply(200, currentSettingBody());
+	mockAgent.get('http://192.168.1.1:5555').intercept({ path: '/soap/server_sa/', method: 'POST' })
+		.reply(200, soapPortOkResponse());
+
+	assert.equal(await router.login(), true);
+	assert.equal(router.port, 5555);
+	assert.equal(router.tls, false);
 });

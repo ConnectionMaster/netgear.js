@@ -19,6 +19,8 @@ Cable Gateway: C7000 C6300 C6250 C3700 C3000 N450
 ### Newer / untested routers
 Netgear doesn't publish a list of which models expose this SOAP interface, so the list above is built from years of community reports rather than official documentation - it predates most WiFi 6/6E/7-generation routers. The interface does appear to still exist on at least some current-generation hardware: a [2023 security disclosure](https://therecord.media/netgear-releases-patches-for-two-bugs) documents a SOAP-API authentication flaw specifically in the WiFi 6E **Orbi 760** series, confirming that line still runs a SOAP API. Whether login and the various get/set calls in this package still work unmodified on Orbi 760+/WiFi 7-generation Orbi, or on recent Nighthawk WiFi 6/6E models, has not been verified by this package - if you have one of these and can confirm it works (or doesn't), please [open an issue](https://github.com/gruijter/netgear.js/issues).
 
+Recent firmware on some of these models is HTTPS-only: it refuses plain `http` on port 80 outright, and serves both `currentsetting.htm` and the SOAP endpoint over TLS on port 443, 5043 or 5555. Since v5.0.1 autodiscovery handles this - `getCurrentSetting()` falls back to those TLS ports when :80 cannot be reached, and `login()` adopts the discovered port and scheme - so you should not need to set `port` or `tls` by hand. If discovery still fails on such a router, run the compatibility test (`npm test password=mySecretPassword`) and include its output in an issue: the `effective transport:` line reports which port and scheme were actually used.
+
 ## Requirements
 Node.js >= 22.
 
@@ -100,7 +102,11 @@ router.discover()
 // function to get various information
 async function getRouterInfo() {
 	try {
-		// Get router type, soap version, firmware version and internet connection status without login
+		// Get router type, soap version, firmware version and internet connection status without login.
+		// Autodiscovers the SOAP port and whether TLS is needed. Optional extra arguments:
+		// getCurrentSetting(host, timeout, { httpsFallback: true }) - httpsFallback (default
+		// true) also probes currentsetting.htm over TLS on ports 443, 5043 and 5555 when plain
+		// http:80 cannot be reached, which is what HTTPS-only firmware needs.
 		const currentSetting = await router.getCurrentSetting();
 		console.log(currentSetting);
 
@@ -109,7 +115,7 @@ async function getRouterInfo() {
 			password: 'mySecretPassword',	// Password can also be passed during login
 			host: '192.168.1.1',	// Autodiscovery will be performed when left out
 			port: 80,	// SOAP port. Autodiscovery will be performed when left out
-			tls: false,	// TLS/SSL (HTTPS) is only supported on certain router types
+			tls: false,	// Use HTTPS for the SOAP calls. Autodiscovery will be performed when left out
 		}
 		await router.login(options);
 

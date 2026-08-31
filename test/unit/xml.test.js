@@ -36,7 +36,8 @@ test('parseSoapObject maps empty/self-closing tags to undefined, matching the xm
 });
 
 test('parseSoapObject maps a whitespace-only tag to undefined too, matching the xml-js behavior it replaces', () => {
-	const body = envelope('<m:GetInfoResponse><VPNVersion>   </VPNVersion><FirmwareDLmethod>\n</FirmwareDLmethod><OthersoftwareVersion>N/A</OthersoftwareVersion></m:GetInfoResponse>');
+	const tags = '<VPNVersion>   </VPNVersion><FirmwareDLmethod>\n</FirmwareDLmethod><OthersoftwareVersion>N/A</OthersoftwareVersion>';
+	const body = envelope(`<m:GetInfoResponse>${tags}</m:GetInfoResponse>`);
 	const result = xml.parseSoapObject(body, 'GetInfoResponse');
 	assert.equal(result.VPNVersion, undefined);
 	assert.equal(result.FirmwareDLmethod, undefined);

@@ -29,6 +29,12 @@ const defaultUser = 'admin';
 const defaultPassword = 'password';
 const defaultSessionId = 'A7D88AE69687E58D9A00';	// '10588AE69687E58D9A00'
 
+// The ports Netgear firmware serves SOAP over TLS, in priority order. HTTPS-only models
+// (recent Orbi firmware) serve the unauthenticated currentsetting.htm on the same ports.
+// Shared by getCurrentSetting()'s HTTPS fallback and _getSoapPort()'s scan so the two
+// lists cannot drift apart - port 5043 was once missing from one of them.
+const tlsSoapPorts = [443, 5043, 5555];
+
 // Increasing verbosity; a message is only emitted when its rank is <= the configured
 // logLevel's rank. 'silent' (-1) emits nothing at all.
 const logLevelRanks = {
@@ -91,6 +97,10 @@ class NetgearRouter extends EventEmitter {
 		this.host = options.host || host || defaultHost;
 		this.port = options.port || port;	// defaults with tls: 443, 5555. no tls: 5000, 80
 		this.tls = options.tls === undefined ? (this.port !== 80) : options.tls; // set tls true as default, except when using port 80
+		// this.tls is a boolean either way from here on, so nothing downstream can tell a
+		// deliberate setting from the port-derived default. Record it, so login() knows
+		// whether it may replace tls with what discovery found.
+		this.tlsWasSet = options.tls !== undefined;
 		this.username = options.username || username || defaultUser;
 		this.password = options.password || opts || defaultPassword;
 		this.timeout = options.timeout || 18000;
@@ -168,8 +178,13 @@ class NetgearRouter extends EventEmitter {
 		// discover soap port, tls and login method supported by router
 		if (!this.loginMethod || !this.port) {
 			const currentSetting = await this.getCurrentSetting(); // will set this.loginMethod
-			if (!this.port) this.port = currentSetting.port; // keep manually set port
-			if (this.tls === undefined) this.tls = currentSetting.tls; // keep manual set tls
+			if (!this.port) { // keep a manually set port, and the tls that goes with it
+				this.port = currentSetting.port;
+				// Only meaningful together with the discovered port: an HTTPS-only router
+				// discovered on e.g. :5555 is unreachable if we keep the constructor's
+				// port-derived tls default. An explicit { tls } from the caller still wins.
+				if (!this.tlsWasSet) this.tls = currentSetting.tls;
+			}
 		}
 		let loggedIn = false;
 		const messageNew = soap.login(this.sessionId, this.username, this.password);
@@ -239,34 +254,88 @@ class NetgearRouter extends EventEmitter {
 	/**
 	* Get router information without need for credentials. Autodiscovers the SOAP port and TLS
 	* @param {string} [host] - The url or ip address of the router.
+	* @param {number} [timeout] - request timeout in ms.
+	* @param {object} [options]
+	* @param {boolean} [options.httpsFallback=true] - when the plain http:80 probe cannot be
+	* reached, also try currentsetting.htm over TLS on the SOAP ports (443, 5043, 5555). Set
+	* false for the wide network scan, which must stay fast and only cares about :80.
 	* @returns {Promise.<currentSetting>}
 	*/
-	async getCurrentSetting(host, timeout) {
+	async getCurrentSetting(host, timeout, options = {}) {
+		const { httpsFallback = true } = options;
 		const host1 = host || this.host;
-		const url = `http://${host1}:80/currentsetting.htm`;
-		const result = await http.request(url, { method: 'GET', timeout: timeout || this.timeout });
-		this.lastResponse = result.body;
-		// request failed. Logged at 'debug', not 'warn': this method is also used to probe up
-		// to 254 hosts during network-scan discovery, where most hosts are expected to fail.
-		if (result.statusCode !== 200) {
-			this._log('debug', 'getCurrentSetting: non-200 response', { host: host1, statusCode: result.statusCode });
-			throw errors.httpRequestFailed(result.statusCode);
+		const t = timeout || this.timeout;
+		let answered;	// { response, port, tls } of the probe that returned a router body
+		let connectionError;	// why :80 could not be reached - the failure worth reporting
+
+		// currentsetting.htm is classically an unauthenticated GET on plain http port 80, and
+		// an HTTP response there is authoritative: a non-200, or a body without Model=, means
+		// this host answered the classic endpoint and simply is not a Netgear router.
+		// Note that a 3xx counts as "could not be reached" rather than as a response: lib/http.js
+		// uses redirect:'error', so the redirect that HTTPS-only firmware serves on :80 is raised
+		// as a fetch error and does fall through to the HTTPS probes below.
+		const httpProbe = await http.request(`http://${host1}:80/currentsetting.htm`, { method: 'GET', timeout: t })
+			.catch((error) => {
+				connectionError = error;
+				return undefined;
+			});
+		if (httpProbe) {
+			this.lastResponse = httpProbe.body;
+			// Logged at 'debug', not 'warn': this method is also used to probe up to 254 hosts
+			// during network-scan discovery, where most hosts are expected to fail.
+			if (httpProbe.statusCode !== 200) {
+				this._log('debug', 'getCurrentSetting: non-200 response', { host: host1, statusCode: httpProbe.statusCode });
+				throw errors.httpRequestFailed(httpProbe.statusCode);
+			}
+			if (!httpProbe.body.includes('Model=')) {
+				this._log('debug', 'getCurrentSetting: not a Netgear router', { host: host1 });
+				throw errors.notNetgearRouter();
+			}
+			answered = { response: httpProbe, port: 80, tls: false };
 		}
-		if (!result.body.includes('Model=')) {
-			this._log('debug', 'getCurrentSetting: not a Netgear router', { host: host1 });
-			throw errors.notNetgearRouter();
+
+		// HTTPS-only firmware (recent Orbi models) refuses :80 outright and serves
+		// currentsetting.htm only over TLS on a SOAP port. Unlike on :80, an HTTP response here
+		// is NOT authoritative - :443 commonly serves the web-UI login page on a router whose
+		// currentsetting.htm lives on :5555 - so anything that isn't a router body just means
+		// "look at the next port". Probed concurrently and resolved by priority order, the same
+		// way _getSoapPort scans, so the fallback costs one timeout instead of three.
+		if (!answered && httpsFallback) {
+			const probes = await Promise.all(tlsSoapPorts.map((port) => http
+				.request(`https://${host1}:${port}/currentsetting.htm`, { method: 'GET', timeout: t, insecure: true })
+				.then((response) => (response.statusCode === 200 && response.body.includes('Model=') ? response : undefined))
+				.catch(() => undefined)));
+			const index = probes.findIndex(Boolean);
+			if (index !== -1) {
+				answered = { response: probes[index], port: tlsSoapPorts[index], tls: true };
+				this.lastResponse = answered.response.body;
+			}
 		}
+
+		if (!answered) {
+			this._log('debug', 'getCurrentSetting: no router response on any probed port', { host: host1 });
+			throw connectionError;
+		}
+
 		// request successfull
 		const currentSetting = {};
-		result.body.split(/[\r\n\t\s]+/gm).forEach((entry) => {
+		answered.response.body.split(/[\r\n\t\s]+/gm).forEach((entry) => {
 			const info = entry.split('=');
 			if (info.length === 2) currentSetting[info[0]] = info[1];
 		});
 		currentSetting.host = host1; // add the host address to the information
-		currentSetting.port = currentSetting.SOAP_HTTPs_Port || await this._getSoapPort(host1); // add port address to the information
-		currentSetting.tls = !!currentSetting.SOAP_HTTPs_Port;
-		if (currentSetting.port === 443 || currentSetting.port === 5555
-			|| currentSetting.port === 5043) currentSetting.tls = true; // add tls to the information
+		// The port the router advertises wins. Otherwise, a TLS probe that answered has just
+		// proven that port and scheme work, so trust it over a fresh SOAP scan - which can
+		// otherwise report a plain-http port for a router that refused plain http a moment ago.
+		if (currentSetting.SOAP_HTTPs_Port) {
+			currentSetting.port = currentSetting.SOAP_HTTPs_Port;
+		} else if (answered.tls) {
+			currentSetting.port = answered.port;
+		} else {
+			currentSetting.port = await this._getSoapPort(host1); // add port address to the information
+		}
+		currentSetting.tls = !!currentSetting.SOAP_HTTPs_Port
+			|| tlsSoapPorts.includes(Number(currentSetting.port)); // add tls to the information
 		this.loginMethod = Number(currentSetting.LoginMethod) || 1;
 		this.soapVersion = parseInt(currentSetting.SOAPVersion, 10) || 2;
 		this._log('debug', 'getCurrentSetting discovered', {
@@ -1278,9 +1347,27 @@ class NetgearRouter extends EventEmitter {
 			const allHosts = await mapWithConcurrency(
 				hostsToTest,
 				32,
-				(hostToTest) => this.getCurrentSetting(hostToTest, 4000).catch(() => undefined),
+				// scan only the legacy http:80 endpoint - trying HTTPS on every one of 254 hosts
+				// would multiply the scan time by the TLS-handshake timeout of every dead IP
+				(hostToTest) => this.getCurrentSetting(hostToTest, 4000, { httpsFallback: false }).catch(() => undefined),
 			);
-			const discoveredHosts = allHosts.filter((host) => host);
+			let discoveredHosts = allHosts.filter((host) => host);
+			// An HTTPS-only router refuses :80 and is therefore invisible to the scan above.
+			// Rather than pay a TLS handshake timeout on all 254 addresses, retry with the
+			// HTTPS fallback on just the ones a LAN gateway realistically has.
+			if (!discoveredHosts[0]) {
+				const gateways = [];
+				networks.forEach((network) => {
+					gateways.push(network.address.replace(/\.\d+$/, '.1'));
+					gateways.push(network.address.replace(/\.\d+$/, '.254'));
+				});
+				const gatewayInfo = await mapWithConcurrency(
+					gateways,
+					32,
+					(hostToTest) => this.getCurrentSetting(hostToTest, 4000).catch(() => undefined),
+				);
+				discoveredHosts = gatewayInfo.filter((host) => host);
+			}
 			if (!discoveredHosts[0]) throw new Error('No Netgear router could be discovered');
 			return discoveredHosts;
 		} catch (error) {
@@ -1331,9 +1418,7 @@ class NetgearRouter extends EventEmitter {
 		// returns the soap port (80, 443, 5000, 5043 or 5555), or undefined if none respond
 		if (!host1 || host1 === '') throw new Error('getSoapPort failed: Host ip is not provided');
 		const candidates = [
-			{ port: 443, tls: true },
-			{ port: 5043, tls: true },
-			{ port: 5555, tls: true },
+			...tlsSoapPorts.map((port) => ({ port, tls: true })),
 			{ port: 5000, tls: false },
 			{ port: 80, tls: false },
 		];

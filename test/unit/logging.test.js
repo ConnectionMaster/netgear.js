@@ -133,7 +133,7 @@ test('the login password is never present in an emitted log payload, even at log
 	assert.match(serialized, /\[redacted]/);
 });
 
-test('the login password is never present in an emitted log payload for the legacy loginOld method either (uses a differently-named <NewPassword> tag)', async () => {
+test('the login password is redacted for the legacy loginOld method too (differently-named <NewPassword> tag)', async () => {
 	const router = makeRouter({
 		logLevel: 'debug', loggedIn: false, loginMethod: 1, password: 'super-secret-password',
 	});
@@ -149,7 +149,8 @@ test('the login password is never present in an emitted log payload for the lega
 test('a WPA passphrase returned by getWPASecurityKeys is never present in an emitted log payload, even at logLevel:"debug"', async () => {
 	const router = makeRouter({ logLevel: 'debug' });
 	const events = collectLogs(router);
-	reply(soap.action.getWPASecurityKeys, soapOk('<m:GetWPASecurityKeysResponse><NewWPAPassphrase>mySecretWifiPassword</NewWPAPassphrase></m:GetWPASecurityKeysResponse>'));
+	const keysResponse = '<m:GetWPASecurityKeysResponse><NewWPAPassphrase>mySecretWifiPassword</NewWPAPassphrase></m:GetWPASecurityKeysResponse>';
+	reply(soap.action.getWPASecurityKeys, soapOk(keysResponse));
 
 	await router.getWPASecurityKeys();
 	const serialized = JSON.stringify(events);

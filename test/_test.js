@@ -104,6 +104,10 @@ async function getRouterInfo() {
 		log.push('trying to login using auto method...');
 		await router.login();
 		log.push(`reported login method: ${router.loginMethod}`);
+		// The transport login() actually settled on. On HTTPS-only firmware (recent Orbi) the
+		// plain http:80 endpoint is refused, and both the port and the scheme come from
+		// autodiscovery - this line is what tells those reports apart from a plain :80 router.
+		log.push(`effective transport: ${router.tls ? 'https' : 'http'}://${router.host}:${router.port}`);
 		log.push(`t = ${(Date.now() - t0) / 1000}`);
 
 		// Get router type, serial number, hardware version, firmware version, soap version, firewall version, etc.
