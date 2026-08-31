@@ -8,6 +8,7 @@
 
 const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
+const os = require('node:os');
 const { MockAgent, setGlobalDispatcher, getGlobalDispatcher } = require('undici');
 const http = require('../../lib/http');
 const { makeRouter } = require('./helpers');
@@ -211,4 +212,42 @@ test('login keeps an explicitly configured tls over the discovered one', async (
 	assert.equal(await router.login(), true);
 	assert.equal(router.port, 5555);
 	assert.equal(router.tls, false);
+});
+
+test('login({ tls }) pins tls against autodiscovery, the same as the constructor option', async () => {
+	// tls passed as a login option is an explicit setting too - discovery must not override it
+	mockAgent.get('https://192.168.1.1:5555').intercept({ path: '/currentsetting.htm', method: 'GET' })
+		.reply(200, currentSettingBody());
+	mockAgent.get('http://192.168.1.1:5555').intercept({ path: '/soap/server_sa/', method: 'POST' })
+		.reply(200, soapPortOkResponse());
+
+	const router = makeRouter({ port: undefined, loginMethod: undefined, loggedIn: false });
+	assert.equal(await router.login({ tls: false }), true);
+	assert.equal(router.port, 5555);
+	assert.equal(router.tls, false);
+});
+
+test('_discoverAllHostsInfo retries the gateway addresses over https when the http:80 scan finds nothing', async (t) => {
+	// pretend we are on 192.168.1.50/24, so the scan sweeps 192.168.1.1-254 on :80 (all
+	// refused by disableNetConnect) and then retries .1 and .254 with the https fallback
+	t.mock.method(os, 'networkInterfaces', () => ({
+		eth0: [{ family: 'IPv4', internal: false, address: '192.168.1.50' }],
+	}));
+	mockAgent.get('https://192.168.1.1:5555').intercept({ path: '/currentsetting.htm', method: 'GET' })
+		.reply(200, currentSettingBody());
+
+	const router = makeRouter({ host: undefined, port: undefined, tls: undefined });
+	const [info] = await router._discoverAllHostsInfo();
+	assert.equal(info.host, '192.168.1.1');
+	assert.equal(info.port, 5555);
+	assert.equal(info.tls, true);
+});
+
+test('_discoverAllHostsInfo still throws when neither the scan nor the gateway retry finds a router', async (t) => {
+	t.mock.method(os, 'networkInterfaces', () => ({
+		eth0: [{ family: 'IPv4', internal: false, address: '192.168.1.50' }],
+	}));
+
+	const router = makeRouter({ host: undefined, port: undefined, tls: undefined });
+	await assert.rejects(router._discoverAllHostsInfo(), /No Netgear router could be discovered/);
 });

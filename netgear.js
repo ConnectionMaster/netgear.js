@@ -99,7 +99,9 @@ class NetgearRouter extends EventEmitter {
 		this.tls = options.tls === undefined ? (this.port !== 80) : options.tls; // set tls true as default, except when using port 80
 		// this.tls is a boolean either way from here on, so nothing downstream can tell a
 		// deliberate setting from the port-derived default. Record it, so login() knows
-		// whether it may replace tls with what discovery found.
+		// whether it may replace tls with what discovery found. Set from here and from
+		// login({ tls }) - assigning router.tls as a bare property is NOT tracked, and
+		// autodiscovery may then override it. Pass tls as an option to pin it.
 		this.tlsWasSet = options.tls !== undefined;
 		this.username = options.username || username || defaultUser;
 		this.password = options.password || opts || defaultPassword;
@@ -166,7 +168,10 @@ class NetgearRouter extends EventEmitter {
 		}
 		this.host = options.host || host || this.host;
 		this.port = options.port || port || this.port;
-		this.tls = options.tls === undefined ? this.tls : options.tls;
+		if (options.tls !== undefined) {
+			this.tls = options.tls;
+			this.tlsWasSet = true;
+		}
 		this.username = options.username || username || this.username;
 		this.timeout = options.timeout || this.timeout;
 		if (!this.host || this.host === '') {
