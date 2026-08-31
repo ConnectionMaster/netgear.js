@@ -46,6 +46,10 @@ async function setupSession(opts) {
 			}
 			router[opt] = opts[opt];
 		});
+		// tls given on the command line is a deliberate setting, but the bare assignment
+		// above is indistinguishable from a no-op when it matches the current value - pin
+		// it explicitly so autodiscovery cannot override what was asked for.
+		if (opts.tls !== undefined) router.tlsAuto = undefined;
 		t0 = Date.now();
 		errorCount = 0;
 		log.push('t = 0');

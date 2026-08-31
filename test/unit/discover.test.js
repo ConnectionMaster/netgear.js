@@ -200,10 +200,12 @@ test('login adopts the tls discovered by the https fallback, not the constructor
 	assert.equal(router.tls, true);
 });
 
-test('login keeps an explicitly configured tls over the discovered one', async () => {
-	const router = makeRouter({ port: undefined, loginMethod: undefined, loggedIn: false });
-	router.tlsWasSet = true; // as set by the constructor for `new NetgearRouter({ tls: false })`
-	router.tls = false;
+test('login keeps a tls pinned by a bare router.tls assignment over the discovered one', async () => {
+	// as `new NetgearRouter({ password })` builds it: tls at its automatic default of true
+	const router = makeRouter({
+		port: undefined, tls: true, tlsAuto: true, loginMethod: undefined, loggedIn: false,
+	});
+	router.tls = false; // a bare assignment pins it just as the constructor option would
 	mockAgent.get('https://192.168.1.1:5555').intercept({ path: '/currentsetting.htm', method: 'GET' })
 		.reply(200, currentSettingBody());
 	mockAgent.get('http://192.168.1.1:5555').intercept({ path: '/soap/server_sa/', method: 'POST' })

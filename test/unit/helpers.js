@@ -25,6 +25,7 @@ const makeRouter = (overrides = {}) => {
 	router.host = '192.168.1.1';
 	router.port = 80;
 	router.tls = false;
+	router.tlsAuto = false; // matching tls: a fixture default, not a caller-pinned setting
 	router.loggedIn = true;
 	router.loginMethod = 2;
 	// the request-rate limiter itself is covered separately (with fake timers) in

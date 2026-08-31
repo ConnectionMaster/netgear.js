@@ -97,12 +97,14 @@ class NetgearRouter extends EventEmitter {
 		this.host = options.host || host || defaultHost;
 		this.port = options.port || port;	// defaults with tls: 443, 5555. no tls: 5000, 80
 		this.tls = options.tls === undefined ? (this.port !== 80) : options.tls; // set tls true as default, except when using port 80
-		// this.tls is a boolean either way from here on, so nothing downstream can tell a
-		// deliberate setting from the port-derived default. Record it, so login() knows
-		// whether it may replace tls with what discovery found. Set from here and from
-		// login({ tls }) - assigning router.tls as a bare property is NOT tracked, and
-		// autodiscovery may then override it. Pass tls as an option to pin it.
-		this.tlsWasSet = options.tls !== undefined;
+		// this.tls is a boolean either way from here on, so nothing downstream could otherwise
+		// tell a deliberate setting from the port-derived default - and autodiscovery must never
+		// silently override one the caller chose. tlsAuto holds the last tls value this class
+		// wrote by itself, so `this.tls !== this.tlsAuto` means "the caller pinned it" - however
+		// it was pinned: this option, login({ tls }), or a bare `router.tls = false`. Leaving it
+		// undefined below marks an explicit option as pinned from the start. An assignment that
+		// matches the value already there goes undetected, and needs no detection: it is a no-op.
+		this.tlsAuto = options.tls === undefined ? this.tls : undefined;
 		this.username = options.username || username || defaultUser;
 		this.password = options.password || opts || defaultPassword;
 		this.timeout = options.timeout || 18000;
@@ -124,6 +126,18 @@ class NetgearRouter extends EventEmitter {
 		// controls which _log() calls actually emit a 'log' event - see _log() below.
 		// Mutable at any time (e.g. `router.logLevel = 'debug'` while troubleshooting).
 		this.logLevel = options.logLevel || 'warn';
+	}
+
+	// Whether the caller pinned tls, so autodiscovery must leave it alone - see tlsAuto.
+	get tlsPinned() {
+		return this.tls !== this.tlsAuto;
+	}
+
+	// Writes a tls value that came from autodiscovery rather than from the caller, so that a
+	// later discovery is still free to replace it.
+	_setDiscoveredTls(tls) {
+		this.tls = tls;
+		this.tlsAuto = tls;
 	}
 
 	// Emits a 'log' event ({ level, message, timestamp, ...context }) when `level` is at or
@@ -149,7 +163,7 @@ class NetgearRouter extends EventEmitter {
 		const discoveredInfo = await this._discoverHostInfo(dnsLookupOptions);
 		this.host = discoveredInfo.host;
 		this.port = discoveredInfo.port;
-		this.tls = discoveredInfo.tls;
+		this._setDiscoveredTls(discoveredInfo.tls); // discover() overrides by design
 		return discoveredInfo;
 	}
 
@@ -170,7 +184,7 @@ class NetgearRouter extends EventEmitter {
 		this.port = options.port || port || this.port;
 		if (options.tls !== undefined) {
 			this.tls = options.tls;
-			this.tlsWasSet = true;
+			this.tlsAuto = undefined; // pinned by the caller
 		}
 		this.username = options.username || username || this.username;
 		this.timeout = options.timeout || this.timeout;
@@ -187,8 +201,8 @@ class NetgearRouter extends EventEmitter {
 				this.port = currentSetting.port;
 				// Only meaningful together with the discovered port: an HTTPS-only router
 				// discovered on e.g. :5555 is unreachable if we keep the constructor's
-				// port-derived tls default. An explicit { tls } from the caller still wins.
-				if (!this.tlsWasSet) this.tls = currentSetting.tls;
+				// port-derived tls default. A tls the caller pinned still wins.
+				if (!this.tlsPinned) this._setDiscoveredTls(currentSetting.tls);
 			}
 		}
 		let loggedIn = false;
