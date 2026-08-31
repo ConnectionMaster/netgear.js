@@ -196,8 +196,15 @@ class NetgearRouter extends EventEmitter {
 		}
 		// discover soap port, tls and login method supported by router
 		if (!this.loginMethod || !this.port) {
-			const currentSetting = await this.getCurrentSetting(); // will set this.loginMethod
-			if (!this.port) { // keep a manually set port, and the tls that goes with it
+			// Without a port this probe is the only way to find one, so its failure is fatal.
+			// With a port already set it merely optimizes the order the two login methods are
+			// tried in (both are tried either way), so an unreachable currentsetting.htm -
+			// HTTPS-only firmware serving it on a port we don't probe, or behind auth - must
+			// not abort a login that the caller's host/port/tls would have completed fine.
+			const currentSetting = this.port
+				? await this.getCurrentSetting().catch(() => undefined) // will set this.loginMethod
+				: await this.getCurrentSetting();
+			if (currentSetting && !this.port) { // keep a manually set port, and the tls that goes with it
 				this.port = currentSetting.port;
 				// Only meaningful together with the discovered port: an HTTPS-only router
 				// discovered on e.g. :5555 is unreachable if we keep the constructor's
@@ -206,6 +213,7 @@ class NetgearRouter extends EventEmitter {
 			}
 		}
 		let loggedIn = false;
+		let methodUsed;	// the method that actually worked, see below
 		const messageNew = soap.login(this.sessionId, this.username, this.password);
 		const messageOld = soap.loginOld(this.sessionId, this.username, this.password);
 		// The 4 branches below are deliberately left explicit rather than routed through the
@@ -219,13 +227,13 @@ class NetgearRouter extends EventEmitter {
 		if (triedOldAsPrimary) {
 			this.cookie = undefined; // reset the cookie
 			loggedIn = await this._queueMessage(soap.action.loginOld, messageOld)
-				.then(() => true)
+				.then(() => { methodUsed = 1; return true; })
 				.catch(() => false);
 		}
 		// use new method if opts method 2 selected, or auto method selected and loginMethod = 2
 		if (triedNewAsPrimary) {
 			loggedIn = await this._queueMessage(soap.action.login, messageNew)
-				.then(() => true)
+				.then(() => { methodUsed = 2; return true; })
 				.catch(() => {
 					this.cookie = undefined; // reset the cookie
 					return false;
@@ -236,13 +244,13 @@ class NetgearRouter extends EventEmitter {
 		// exact same failed call instead of trying the untried alternative)
 		if (!options.method && !loggedIn && !triedOldAsPrimary) {
 			loggedIn = await this._queueMessage(soap.action.loginOld, messageOld)
-				.then(() => true)
+				.then(() => { methodUsed = 1; return true; })
 				.catch(() => false);
 		}
 		// use new login method as fallback, same reasoning
 		if (!options.method && !loggedIn && !triedNewAsPrimary) {
 			loggedIn = await this._queueMessage(soap.action.login, messageNew)
-				.then(() => true)
+				.then(() => { methodUsed = 2; return true; })
 				.catch(() => {
 					this.cookie = undefined; // reset the cookie
 					return false;
@@ -252,6 +260,10 @@ class NetgearRouter extends EventEmitter {
 			this._log('warn', 'Login failed', { host: this.host, port: this.port });
 			throw new Error('Failed to login');
 		}
+		// A router that never answered currentsetting.htm leaves loginMethod unknown, which would
+		// re-probe (and re-pay its timeouts) on every later login of this session. What just
+		// worked is a better answer than the probe would have given anyway.
+		if (!this.loginMethod && methodUsed) this.loginMethod = methodUsed;
 		this.loggedIn = true;
 		this._log('info', 'Login succeeded', {
 			host: this.host, port: this.port, loginMethod: this.loginMethod,

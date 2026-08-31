@@ -200,6 +200,31 @@ test('login adopts the tls discovered by the https fallback, not the constructor
 	assert.equal(router.tls, true);
 });
 
+test('login with a known port survives an unreachable currentsetting.htm', async () => {
+	// HTTPS-only firmware that serves currentsetting.htm nowhere we probe: http:80 is refused
+	// and none of the TLS SOAP ports answer the GET. With host/port/tls already known, that
+	// probe only picks the login-method order, so it must not abort an otherwise fine login.
+	mockAgent.get('https://192.168.1.1:5555').intercept({ path: '/soap/server_sa/', method: 'POST' })
+		.reply(200, soapPortOkResponse());
+
+	const router = makeRouter({
+		port: 5555, tls: true, tlsAuto: undefined, loginMethod: undefined, loggedIn: false,
+	});
+	assert.equal(await router.login(), true);
+	assert.equal(router.port, 5555);
+	assert.equal(router.tls, true);
+	// remembered from what actually worked, so the next login doesn't re-probe
+	assert.equal(router.loginMethod, 1);
+});
+
+test('login without a port still fails when currentsetting.htm cannot be reached', async () => {
+	// nothing pinned to fall back on: the probe is the only source of a port, so it stays fatal
+	const router = makeRouter({
+		port: undefined, tls: false, loginMethod: undefined, loggedIn: false,
+	});
+	await assert.rejects(router.login());
+});
+
 test('login keeps a tls pinned by a bare router.tls assignment over the discovered one', async () => {
 	// as `new NetgearRouter({ password })` builds it: tls at its automatic default of true
 	const router = makeRouter({
