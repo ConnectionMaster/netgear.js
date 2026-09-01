@@ -19,7 +19,11 @@ Cable Gateway: C7000 C6300 C6250 C3700 C3000 N450
 ### Newer / untested routers
 Netgear doesn't publish a list of which models expose this SOAP interface, so the list above is built from years of community reports rather than official documentation - it predates most WiFi 6/6E/7-generation routers. The interface does appear to still exist on at least some current-generation hardware: a [2023 security disclosure](https://therecord.media/netgear-releases-patches-for-two-bugs) documents a SOAP-API authentication flaw specifically in the WiFi 6E **Orbi 760** series, confirming that line still runs a SOAP API. Whether login and the various get/set calls in this package still work unmodified on Orbi 760+/WiFi 7-generation Orbi, or on recent Nighthawk WiFi 6/6E models, has not been verified by this package - if you have one of these and can confirm it works (or doesn't), please [open an issue](https://github.com/gruijter/netgear.js/issues).
 
-Recent firmware on some of these models is HTTPS-only: it refuses plain `http` on port 80 outright, and serves both `currentsetting.htm` and the SOAP endpoint over TLS on port 443, 5043 or 5555. Since v5.1.0 autodiscovery handles this - `getCurrentSetting()` falls back to those TLS ports when :80 cannot be reached, and `login()` adopts the discovered port and scheme - so you should not need to set `port` or `tls` by hand. If discovery still fails on such a router, run the compatibility test (`npm test password=mySecretPassword`) and include its output in an issue: the `effective transport:` line reports which port and scheme were actually used.
+Recent firmware on some of these models is HTTPS-only: it refuses plain `http` on port 80 outright, and serves both `currentsetting.htm` and the SOAP endpoint over TLS on port 443, 5043 or 5555. Since v5.1.0 autodiscovery handles this - `getCurrentSetting()` falls back to those TLS ports when :80 cannot be reached, and `login()` adopts the discovered port and scheme - so you should not need to set `port` or `tls` by hand.
+
+Some routers go a step further and serve no reachable `currentsetting.htm` at all, while still answering SOAP normally. Since v5.2.0 those are found too, by probing the SOAP endpoints themselves: `login()` does this as a last resort when no `port` is set, and `discover()` scans the LAN gateway addresses this way once both `currentsetting.htm` passes come up empty. No credentials are needed for it - the probe just checks whether a SOAP endpoint answers at all. The result of such a discovery necessarily carries only `host`, `port` and `tls`; every other `currentSetting` property is read out of `currentsetting.htm` and is simply absent.
+
+If discovery still fails on such a router, run the compatibility test (`npm test password=mySecretPassword`) and include its output in an issue: the `effective transport:` line reports which port and scheme were actually used.
 
 ## Requirements
 Node.js >= 22.
@@ -94,7 +98,9 @@ const NetgearRouter = require('netgear');
 // note: options can be passed in here. See login options.
 const router = new NetgearRouter();
 
-// discover a netgear router, including IP address and SOAP port. The discovered address and SOAP port will override previous settings
+// discover a netgear router, including IP address and SOAP port. The discovered address and SOAP port will override previous settings.
+// A router that serves no reachable currentsetting.htm is found by probing its SOAP endpoints
+// directly, in which case only host, port and tls are reported.
 router.discover()
 	.then(discovered => console.log(discovered))
 	.catch(error => console.log(error));
