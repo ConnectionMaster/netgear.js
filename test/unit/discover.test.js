@@ -217,12 +217,52 @@ test('login with a known port survives an unreachable currentsetting.htm', async
 	assert.equal(router.loginMethod, 1);
 });
 
-test('login without a port still fails when currentsetting.htm cannot be reached', async () => {
-	// nothing pinned to fall back on: the probe is the only source of a port, so it stays fatal
+test('login without a port still fails when neither currentsetting.htm nor any SOAP port answers', async () => {
+	// no interceptors at all: the file probe fails and so does the direct endpoint scan behind
+	// it, leaving no port to log in to - the probe's own error is what must surface
 	const router = makeRouter({
 		port: undefined, tls: false, loginMethod: undefined, loggedIn: false,
 	});
-	await assert.rejects(router.login());
+	await assert.rejects(router.login(), (error) => /fetch failed/.test(error.message));
+});
+
+test('login without a port falls back to a direct SOAP scan when currentsetting.htm is unreachable', async () => {
+	// the remaining Orbi case: no currentsetting.htm anywhere we probe (http:80 refused, and
+	// none of the TLS ports serve the file), but the SOAP endpoint on :5555 answers fine.
+	// persist(): the same origin takes the _getSoapPort probe and then the login POST
+	mockAgent.get('https://192.168.1.1:5555').intercept({ path: '/soap/server_sa/', method: 'POST' })
+		.reply(200, soapPortOkResponse()).persist();
+
+	const router = makeRouter({
+		port: undefined, tls: false, loginMethod: undefined, loggedIn: false,
+	});
+	assert.equal(await router.login(), true);
+	assert.equal(router.port, 5555);
+	assert.equal(router.tls, true); // 5555 is a TLS SOAP port, and tls was not pinned here
+	// currentsetting.htm never answered, so loginMethod comes from the ladder, not the probe
+	assert.equal(router.loginMethod, 1);
+});
+
+test('login keeps a pinned tls over the one implied by a directly scanned SOAP port', async () => {
+	mockAgent.get('http://192.168.1.1:5000').intercept({ path: '/soap/server_sa/', method: 'POST' })
+		.reply(200, soapPortOkResponse()).persist();
+
+	const router = makeRouter({ port: undefined, loginMethod: undefined, loggedIn: false });
+	assert.equal(await router.login({ tls: false }), true);
+	assert.equal(router.port, 5000);
+	assert.equal(router.tls, false);
+});
+
+test('_discoverSoapEndpoint resolves only host/port/tls, and undefined when nothing answers', async () => {
+	mockAgent.get('https://192.168.1.1:5043').intercept({ path: '/soap/server_sa/', method: 'POST' })
+		.reply(200, soapPortOkResponse());
+
+	const router = makeRouter();
+	assert.deepEqual(await router._discoverSoapEndpoint('192.168.1.1'), {
+		host: '192.168.1.1', port: 5043, tls: true,
+	});
+	// nothing mocked for this host -> every candidate port is refused
+	assert.equal(await router._discoverSoapEndpoint('192.168.1.2'), undefined);
 });
 
 test('login keeps a tls pinned by a bare router.tls assignment over the discovered one', async () => {
@@ -268,6 +308,20 @@ test('_discoverAllHostsInfo retries the gateway addresses over https when the ht
 	assert.equal(info.host, '192.168.1.1');
 	assert.equal(info.port, 5555);
 	assert.equal(info.tls, true);
+});
+
+test('_discoverAllHostsInfo scans the gateways for a bare SOAP endpoint when no currentsetting.htm answers', async (t) => {
+	// last resort after both file-based passes come up empty: the router answers SOAP but
+	// serves currentsetting.htm nowhere, so only host/port/tls can be discovered
+	t.mock.method(os, 'networkInterfaces', () => ({
+		eth0: [{ family: 'IPv4', internal: false, address: '192.168.1.50' }],
+	}));
+	mockAgent.get('https://192.168.1.1:5555').intercept({ path: '/soap/server_sa/', method: 'POST' })
+		.reply(200, soapPortOkResponse());
+
+	const router = makeRouter({ host: undefined, port: undefined, tls: undefined });
+	const [info] = await router._discoverAllHostsInfo();
+	assert.deepEqual(info, { host: '192.168.1.1', port: 5555, tls: true });
 });
 
 test('_discoverAllHostsInfo still throws when neither the scan nor the gateway retry finds a router', async (t) => {

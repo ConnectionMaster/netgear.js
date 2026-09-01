@@ -158,6 +158,8 @@ class NetgearRouter extends EventEmitter {
 	* Discovers a netgear router in the network. Also sets the discovered ip address and soap port for this session.
 	* @param {dnsLookupOptions} [options] - dnsLookup options, e.g. { family: 4 }
 	* @returns {Promise.<currentSetting>} The discovered router info, including host ip address and soap port.
+	* A router that serves no reachable currentsetting.htm can still be found by probing its SOAP
+	* endpoints directly, in which case only host, port and tls are known and the rest is absent.
 	*/
 	async discover(dnsLookupOptions) {
 		const discoveredInfo = await this._discoverHostInfo(dnsLookupOptions);
@@ -196,20 +198,31 @@ class NetgearRouter extends EventEmitter {
 		}
 		// discover soap port, tls and login method supported by router
 		if (!this.loginMethod || !this.port) {
-			// Without a port this probe is the only way to find one, so its failure is fatal.
-			// With a port already set it merely optimizes the order the two login methods are
-			// tried in (both are tried either way), so an unreachable currentsetting.htm -
+			// With a port already set this probe merely optimizes the order the two login methods
+			// are tried in (both are tried either way), so an unreachable currentsetting.htm -
 			// HTTPS-only firmware serving it on a port we don't probe, or behind auth - must
 			// not abort a login that the caller's host/port/tls would have completed fine.
-			const currentSetting = this.port
-				? await this.getCurrentSetting().catch(() => undefined) // will set this.loginMethod
-				: await this.getCurrentSetting();
+			let probeError;
+			const currentSetting = await this.getCurrentSetting() // will set this.loginMethod
+				.catch((error) => {
+					probeError = error;
+					return undefined;
+				});
 			if (currentSetting && !this.port) { // keep a manually set port, and the tls that goes with it
 				this.port = currentSetting.port;
 				// Only meaningful together with the discovered port: an HTTPS-only router
 				// discovered on e.g. :5555 is unreachable if we keep the constructor's
 				// port-derived tls default. A tls the caller pinned still wins.
 				if (!this.tlsPinned) this._setDiscoveredTls(currentSetting.tls);
+			}
+			// Without a port there is nothing to log in to, so the probe's failure is fatal - but
+			// only once the SOAP endpoints themselves have been asked directly too, since a router
+			// that serves no reachable currentsetting.htm can still answer SOAP on one of its ports.
+			if (!this.port) {
+				const endpoint = await this._discoverSoapEndpoint();
+				if (!endpoint) throw probeError || new Error('Cannot login: no SOAP port found');
+				this.port = endpoint.port;
+				if (!this.tlsPinned) this._setDiscoveredTls(endpoint.tls);
 			}
 		}
 		let loggedIn = false;
@@ -1386,8 +1399,8 @@ class NetgearRouter extends EventEmitter {
 			// An HTTPS-only router refuses :80 and is therefore invisible to the scan above.
 			// Rather than pay a TLS handshake timeout on all 254 addresses, retry with the
 			// HTTPS fallback on just the ones a LAN gateway realistically has.
+			const gateways = [];
 			if (!discoveredHosts[0]) {
-				const gateways = [];
 				networks.forEach((network) => {
 					gateways.push(network.address.replace(/\.\d+$/, '.1'));
 					gateways.push(network.address.replace(/\.\d+$/, '.254'));
@@ -1398,6 +1411,17 @@ class NetgearRouter extends EventEmitter {
 					(hostToTest) => this.getCurrentSetting(hostToTest, 4000).catch(() => undefined),
 				);
 				discoveredHosts = gatewayInfo.filter((host) => host);
+			}
+			// Last resort: a router serving no reachable currentsetting.htm is invisible to both
+			// passes above, but can still answer SOAP. Ask the endpoints themselves - on the same
+			// short gateway list, since this costs a POST per candidate port per host.
+			if (!discoveredHosts[0] && gateways[0]) {
+				const endpoints = await mapWithConcurrency(
+					gateways,
+					32,
+					(hostToTest) => this._discoverSoapEndpoint(hostToTest).catch(() => undefined),
+				);
+				discoveredHosts = endpoints.filter((host) => host);
 			}
 			if (!discoveredHosts[0]) throw new Error('No Netgear router could be discovered');
 			return discoveredHosts;
@@ -1462,6 +1486,25 @@ class NetgearRouter extends EventEmitter {
 		);
 		const index = results.findIndex(Boolean);
 		return index === -1 ? undefined : candidates[index].port;
+	}
+
+	// Finds a working SOAP endpoint by asking the endpoints themselves, for a router that serves
+	// no reachable currentsetting.htm at all - not on http:80 and not over TLS on a SOAP port.
+	// _getSoapPort can already find such a router, but is only called from getCurrentSetting
+	// *after* that file has answered, so without this it is unreachable exactly when it is needed.
+	// Resolves the { host, port, tls } subset of a currentSetting - and nothing else, since every
+	// other field exists only inside currentsetting.htm. That is all the callers of a discovery
+	// result read: login() (port/tls), the driver's pairing form, and the app's port warning.
+	// loginMethod is deliberately left unset - login()'s ladder tries both methods anyway and
+	// records whichever one worked.
+	async _discoverSoapEndpoint(host) {
+		const host1 = host || this.host;
+		if (!host1 || host1 === '') return undefined;
+		const port = await this._getSoapPort(host1);
+		if (!port) return undefined;
+		const tls = tlsSoapPorts.includes(Number(port));
+		this._log('info', 'SOAP endpoint discovered without currentsetting.htm', { host: host1, port, tls });
+		return { host: host1, port, tls };
 	}
 
 	async _sendWol(mac, secureOnPassword, options) {
@@ -1687,7 +1730,9 @@ module.exports = NetgearRouter;
 
 /**
 * @typedef currentSetting
-* @description currentSetting is an object with properties similar to this.
+* @description currentSetting is an object with properties similar to this. All of them but
+* host, port and tls are read out of the router's currentsetting.htm, so a result produced by
+* probing the SOAP endpoints directly (see discover) carries those three and nothing else.
 * @property {string} Firmware: e.g. 'V1.0.2.60WW'
 * @property {string} RegionTag e.g. 'R7800_WW'
 * @property {string} Region e.g. 'ww'
